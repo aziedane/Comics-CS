@@ -1,0 +1,6 @@
+{
+  "name": "Comic Character Pose & Anatomy Studio",
+  "description": "Aplikasi generator pose karakter dan database anatomi komik berbasis AI untuk komikus, mentransformasi gambar referensi karakter ke berbagai pose, sudut kamera dinamis, dan adegan sesuai naskah komik.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
