@@ -27,7 +27,9 @@ export type ActionCategory =
   | "casual-standing"
   | "seated-thinking"
   | "emotional-breakdown"
-  | "dramatic-turnaround";
+  | "dramatic-turnaround"
+  | "custom"
+  | (string & {});
 
 export type CharacterEmotion =
   | "determined"
@@ -38,7 +40,9 @@ export type CharacterEmotion =
   | "gentle-smile"
   | "exhausted-panting"
   | "sinister-grin"
-  | "neutral-focused";
+  | "neutral-focused"
+  | "custom"
+  | (string & {});
 
 export type PanelAspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
 
@@ -76,7 +80,10 @@ export interface GeneratedPose {
   referenceImageUrl?: string;
   cameraAngle: CameraAngle;
   actionType: ActionCategory;
+  customActionType?: string;
   expression: CharacterEmotion;
+  customExpression?: string;
+  customFeatures?: string;
   artStyle: ComicArtStyle;
   aspectRatio: PanelAspectRatio;
   notes?: string;
@@ -130,3 +137,60 @@ export interface CharacterAnalysisResult {
   artStyleDetected: string;
   promptSummary: string;
 }
+
+export type OutputCategory =
+  | "pose"
+  | "storyboard-panel"
+  | "character-cutout"
+  | "hd-background"
+  | "character-sheet"
+  | "custom";
+
+export interface OutputItem {
+  id: string;
+  title: string;
+  category: OutputCategory;
+  filename: string;
+  url: string; // server static path /outputs/xyz or data uri
+  thumbnailUrl?: string;
+  characterName?: string;
+  scriptSnippet?: string;
+  promptUsed?: string;
+  cameraAngle?: string;
+  artStyle?: string;
+  aspectRatio?: string;
+  fileSizeBytes?: number;
+  formattedSize?: string;
+  mimeType: string;
+  createdAt: number;
+  tags?: string[];
+  isFavorite?: boolean;
+}
+
+export interface OutputFolderStats {
+  totalFiles: number;
+  totalSizeBytes: number;
+  formattedTotalSize: string;
+  categoryCounts: Record<OutputCategory, number>;
+  latestUpdated?: number;
+}
+
+export interface GeneratedBackground {
+  id: string;
+  title: string;
+  environmentPrompt: string;
+  scriptSnippet?: string;
+  imageUrl: string; // High-Definition JPEG scenery plate
+  artStyle: ComicArtStyle;
+  cameraAngle: CameraAngle;
+  aspectRatio: PanelAspectRatio;
+  lightingMood?: string;
+  category?: string;
+  associatedCharacterId?: string;
+  associatedCharacterName?: string;
+  associatedPoseId?: string;
+  createdAt: number;
+  isFavorite?: boolean;
+}
+
+

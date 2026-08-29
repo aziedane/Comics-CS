@@ -85,8 +85,9 @@ export async function convertToRasterPng(
 
 /**
  * Extracts character cutout on a pure transparent PNG background.
- * Uses intelligent corner sampling & flood-fill edge detection + feathering
- * to remove background without eating into the inner character colors or lineart.
+ * Uses intelligent multi-point corner & perimeter sampling, flood-fill background removal,
+ * luminance-aware chroma checks, and soft anti-aliased edge blending to ensure ONLY
+ * the foreground character figure is kept without any residual background clutter.
  */
 export async function createTransparentPngCutout(
   imageUrl: string,
@@ -116,40 +117,66 @@ export async function createTransparentPngCutout(
         const imgData = ctx.getImageData(0, 0, w, h);
         const data = imgData.data;
 
-        // Sample corner pixels to determine dominant background color
-        const corners = [
+        // Sample perimeter and corner pixels to identify background colors
+        const samplePoints: [number, number][] = [
           [0, 0],
           [w - 1, 0],
           [0, h - 1],
           [w - 1, h - 1],
-          [Math.floor(w / 2), 0],
-          [0, Math.floor(h / 2)],
-          [w - 1, Math.floor(h / 2)],
+          [Math.floor(w * 0.25), 0],
+          [Math.floor(w * 0.5), 0],
+          [Math.floor(w * 0.75), 0],
+          [0, Math.floor(h * 0.25)],
+          [0, Math.floor(h * 0.5)],
+          [0, Math.floor(h * 0.75)],
+          [w - 1, Math.floor(h * 0.25)],
+          [w - 1, Math.floor(h * 0.5)],
+          [w - 1, Math.floor(h * 0.75)],
+          [Math.floor(w * 0.25), h - 1],
+          [Math.floor(w * 0.5), h - 1],
+          [Math.floor(w * 0.75), h - 1],
         ];
 
         let bgR = 0;
         let bgG = 0;
         let bgB = 0;
-        let sampleCount = 0;
+        const bgSamples: { r: number; g: number; b: number }[] = [];
 
-        for (const [cx, cy] of corners) {
-          const idx = (cy * w + cx) * 4;
-          bgR += data[idx];
-          bgG += data[idx + 1];
-          bgB += data[idx + 2];
-          sampleCount++;
+        for (const [sx, sy] of samplePoints) {
+          const idx = (sy * w + sx) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          bgR += r;
+          bgG += g;
+          bgB += b;
+          bgSamples.push({ r, g, b });
         }
 
-        bgR = Math.round(bgR / sampleCount);
-        bgG = Math.round(bgG / sampleCount);
-        bgB = Math.round(bgB / sampleCount);
+        const avgBgR = Math.round(bgR / samplePoints.length);
+        const avgBgG = Math.round(bgG / samplePoints.length);
+        const avgBgB = Math.round(bgB / samplePoints.length);
 
-        // Flood fill / scan from edges inward with soft edge feathering
-        // Mask for background
+        const colorDistance = (r1: number, g1: number, b1: number, r2: number, g2: number, b2: number) => {
+          const dr = r1 - r2;
+          const dg = g1 - g2;
+          const db = b1 - b2;
+          return Math.sqrt(dr * dr + dg * dg + db * db);
+        };
+
+        const isSimilarToAnyBgSample = (r: number, g: number, b: number, thresh: number) => {
+          if (colorDistance(r, g, b, avgBgR, avgBgG, avgBgB) <= thresh) return true;
+          for (const s of bgSamples) {
+            if (colorDistance(r, g, b, s.r, s.g, s.b) <= thresh * 0.85) return true;
+          }
+          return false;
+        };
+
+        // Flood fill from outer perimeter inward
         const isBg = new Uint8Array(w * h);
         const queue: number[] = [];
 
-        // Push border pixels
+        // Push all border pixels to queue
         for (let x = 0; x < w; x++) {
           queue.push(x, 0);
           queue.push(x, h - 1);
@@ -159,16 +186,8 @@ export async function createTransparentPngCutout(
           queue.push(w - 1, y);
         }
 
-        const colorDistance = (r: number, g: number, b: number) => {
-          // Euclidean color difference
-          const dr = r - bgR;
-          const dg = g - bgG;
-          const db = b - bgB;
-          return Math.sqrt(dr * dr + dg * dg + db * db);
-        };
-
-        // If background is nearly pure white (standard manga studio isolation)
-        const isWhiteishBg = bgR > 230 && bgG > 230 && bgB > 230;
+        // Light background check (white / off-white comic page background)
+        const isLightBg = avgBgR > 215 && avgBgG > 215 && avgBgB > 215;
 
         while (queue.length > 0) {
           const y = queue.pop()!;
@@ -182,13 +201,12 @@ export async function createTransparentPngCutout(
           const g = data[idx + 1];
           const b = data[idx + 2];
 
-          const dist = colorDistance(r, g, b);
-          const isWhitePixel = isWhiteishBg && r > 225 && g > 225 && b > 225;
+          const isMatch = isSimilarToAnyBgSample(r, g, b, tolerance);
 
-          if (dist <= tolerance || isWhitePixel) {
+          if (isMatch) {
             isBg[pos] = 1;
 
-            // Check 4-way neighbors
+            // 4-way neighbor expansion
             if (x > 0 && !isBg[pos - 1]) queue.push(x - 1, y);
             if (x < w - 1 && !isBg[pos + 1]) queue.push(x + 1, y);
             if (y > 0 && !isBg[pos - w]) queue.push(x, y - 1);
@@ -196,16 +214,16 @@ export async function createTransparentPngCutout(
           }
         }
 
-        // Apply alpha to background pixels with soft edge feathering
+        // Remove outer background pixels while keeping character 100% solid & opaque
         for (let y = 0; y < h; y++) {
           for (let x = 0; x < w; x++) {
             const pos = y * w + x;
             const idx = pos * 4;
 
             if (isBg[pos]) {
-              data[idx + 3] = 0; // Completely transparent
+              data[idx + 3] = 0; // Pure transparent outside character outline
             } else {
-              // Check if it's near the boundary for subtle anti-aliasing
+              // Character interior is 100% solid and opaque
               let neighborBgCount = 0;
               if (x > 0 && isBg[pos - 1]) neighborBgCount++;
               if (x < w - 1 && isBg[pos + 1]) neighborBgCount++;
@@ -213,10 +231,15 @@ export async function createTransparentPngCutout(
               if (y < h - 1 && isBg[pos + w]) neighborBgCount++;
 
               if (neighborBgCount > 0) {
-                // Soft alpha boundary so edges are smooth without halos
-                const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2]);
-                const factor = Math.min(1, Math.max(0.3, dist / (tolerance * 1.5)));
-                data[idx + 3] = Math.round(data[idx + 3] * factor);
+                // Subtle anti-aliasing on the extreme 1px outer boundary
+                const dist = colorDistance(data[idx], data[idx + 1], data[idx + 2], avgBgR, avgBgG, avgBgB);
+                if (dist < tolerance * 0.7) {
+                  data[idx + 3] = Math.round(Math.max(140, 255 * (dist / (tolerance * 0.7))));
+                } else {
+                  data[idx + 3] = 255;
+                }
+              } else {
+                data[idx + 3] = 255; // Solid inside
               }
             }
           }
@@ -235,6 +258,61 @@ export async function createTransparentPngCutout(
     };
 
     img.src = imageUrl;
+  });
+}
+
+/**
+ * Seamlessly composites a transparent character PNG on top of a background image.
+ * Matches aspect ratio and creates a unified high-resolution PNG composite.
+ */
+export async function createCompositeImage(
+  backgroundUrl: string,
+  characterPngUrl: string
+): Promise<string> {
+  if (!backgroundUrl && !characterPngUrl) return "";
+  if (!backgroundUrl) return characterPngUrl;
+  if (!characterPngUrl) return backgroundUrl;
+
+  return new Promise((resolve) => {
+    const bgImg = new Image();
+    bgImg.crossOrigin = "anonymous";
+
+    bgImg.onload = () => {
+      const charImg = new Image();
+      charImg.crossOrigin = "anonymous";
+
+      charImg.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          const w = bgImg.naturalWidth || charImg.naturalWidth || 1024;
+          const h = bgImg.naturalHeight || charImg.naturalHeight || 1024;
+          canvas.width = w;
+          canvas.height = h;
+
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(characterPngUrl);
+            return;
+          }
+
+          // 1. Draw clean background plate
+          ctx.drawImage(bgImg, 0, 0, w, h);
+
+          // 2. Draw transparent character overlay on top
+          ctx.drawImage(charImg, 0, 0, w, h);
+
+          resolve(canvas.toDataURL("image/png"));
+        } catch {
+          resolve(characterPngUrl);
+        }
+      };
+
+      charImg.onerror = () => resolve(backgroundUrl);
+      charImg.src = characterPngUrl;
+    };
+
+    bgImg.onerror = () => resolve(characterPngUrl);
+    bgImg.src = backgroundUrl;
   });
 }
 

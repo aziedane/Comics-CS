@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   FileText,
   Sparkles,
@@ -20,13 +20,16 @@ import {
 import JSZip from "jszip";
 import { ComicCharacter, GeneratedPose, ParsedComicScript, ScriptPanel } from "../types";
 import { SAMPLE_COMIC_SCRIPTS } from "../data/posePresets";
-import { ApiError, generateComicPose, parseComicScript } from "../services/api";
+import { ApiError, generateComicPose, parseComicScript, saveOutputToFolder } from "../services/api";
 import { QuotaCountdownAlert } from "./QuotaCountdownAlert";
 import {
   createTransparentPngCutout,
   exportToHighDefJpeg,
   downloadImage,
 } from "../utils/imageUtils";
+
+const STORAGE_KEY_STORYBOARD_SCRIPT = "mangapose_storyboard_script_v2";
+const STORAGE_KEY_STORYBOARD_PARSED = "mangapose_storyboard_parsed_v2";
 
 interface ScriptToStoryboardProps {
   characters: ComicCharacter[];
@@ -43,9 +46,24 @@ export const ScriptToStoryboard: React.FC<ScriptToStoryboardProps> = ({
   onSavePose,
   onOpenComparison,
 }) => {
-  const [scriptInput, setScriptInput] = useState<string>(SAMPLE_COMIC_SCRIPTS[0].script);
+  const [scriptInput, setScriptInput] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_STORYBOARD_SCRIPT);
+      if (saved) return saved;
+    } catch (e) {}
+    return SAMPLE_COMIC_SCRIPTS[0].script;
+  });
   const [isParsing, setIsParsing] = useState<boolean>(false);
-  const [parsedScript, setParsedScript] = useState<ParsedComicScript | null>(null);
+  const [parsedScript, setParsedScript] = useState<ParsedComicScript | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_STORYBOARD_PARSED);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed.panels)) return parsed;
+      }
+    } catch (e) {}
+    return null;
+  });
   const [isBatchGenerating, setIsBatchGenerating] = useState<boolean>(false);
   const [currentGeneratingPanel, setCurrentGeneratingPanel] = useState<number | null>(null);
   const [isZippingStoryboard, setIsZippingStoryboard] = useState<boolean>(false);
@@ -54,6 +72,22 @@ export const ScriptToStoryboard: React.FC<ScriptToStoryboardProps> = ({
     seconds: number;
     message: string;
   } | null>(null);
+
+  // Sync script input to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_STORYBOARD_SCRIPT, scriptInput);
+    } catch (e) {}
+  }, [scriptInput]);
+
+  // Sync parsed script & panel states to localStorage
+  useEffect(() => {
+    try {
+      if (parsedScript) {
+        localStorage.setItem(STORAGE_KEY_STORYBOARD_PARSED, JSON.stringify(parsedScript));
+      }
+    } catch (e) {}
+  }, [parsedScript]);
 
   // Active character fallback
   const activeChar = selectedCharacter || characters[0];
@@ -220,6 +254,22 @@ export const ScriptToStoryboard: React.FC<ScriptToStoryboardProps> = ({
         panelNumber: panel.panelNumber,
       };
       onSavePose(poseRecord);
+
+      // Auto-save panel to server persistent output folder
+      saveOutputToFolder({
+        id: poseRecord.id,
+        title: `Panel ${panel.panelNumber}: ${panel.actionDescription.slice(0, 30)}`,
+        category: "storyboard-panel",
+        imageBase64: res.imageUrl,
+        characterName: targetChar?.name || panel.characterName || "Protagonis",
+        scriptSnippet: panel.actionDescription,
+        promptUsed: panel.aiPosePrompt,
+        cameraAngle: panel.cameraAngle,
+        artStyle: targetChar?.artStyle || "clean-lineart",
+        aspectRatio: panel.recommendedAspectRatio || "1:1",
+        tags: ["storyboard", `panel-${panel.panelNumber}`, panel.cameraAngle],
+      }).catch((e) => console.warn("Auto-save storyboard panel skipped:", e));
+
       return true;
     } catch (err: any) {
       console.error(`Error generating panel ${panel.panelNumber}:`, err);

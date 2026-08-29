@@ -1,6 +1,8 @@
 import {
   CharacterAnalysisResult,
   GeneratedPose,
+  OutputFolderStats,
+  OutputItem,
   ParsedComicScript,
   PromptEnhanceResult,
 } from "../types";
@@ -35,7 +37,10 @@ export interface GeneratePosePayload {
   artStyle?: string;
   cameraAngle?: string;
   actionType?: string;
+  customActionType?: string;
   expression?: string;
+  customExpression?: string;
+  customFeatures?: string;
   aspectRatio?: string;
   anatomyGuideOverlay?: boolean;
   lightingMood?: string;
@@ -80,7 +85,7 @@ async function handleApiResponse<T>(res: Response, fallbackErrMsg: string): Prom
 }
 
 export async function generateComicPose(payload: GeneratePosePayload): Promise<GeneratePoseResponse> {
-  let processedPayload = { ...payload, separateLayers: payload.separateLayers ?? true };
+  let processedPayload = { ...payload, separateLayers: payload.separateLayers ?? false };
 
   // If a reference image is present, convert SVG/unsupported formats to raster PNG base64
   if (payload.referenceImageBase64) {
@@ -102,16 +107,28 @@ export async function generateComicPose(payload: GeneratePosePayload): Promise<G
 
 export async function generateHdBackground(payload: {
   script?: string;
+  actionPrompt?: string;
   environmentPrompt?: string;
+  characterImageBase64?: string;
   artStyle?: string;
   cameraAngle?: string;
   aspectRatio?: string;
   lightingMood?: string;
+  customFeatures?: string;
 }): Promise<{ success: boolean; backgroundJpegUrl: string; promptUsed: string }> {
+  let processedPayload = { ...payload };
+
+  if (payload.characterImageBase64) {
+    const raster = await convertToRasterPng(payload.characterImageBase64);
+    if (raster.base64) {
+      processedPayload.characterImageBase64 = raster.base64;
+    }
+  }
+
   const res = await fetch("/api/generate-hd-background", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(processedPayload),
   });
 
   return await handleApiResponse(res, "Gagal menghasilkan latar belakang HD.");
@@ -185,3 +202,61 @@ export async function analyzeCharacterImage(
 
   return await handleApiResponse(res, "Gagal menganalisis karakter.");
 }
+
+export async function fetchOutputsList(): Promise<{
+  success: boolean;
+  items: OutputItem[];
+  stats: OutputFolderStats;
+}> {
+  const res = await fetch("/api/outputs");
+  return await handleApiResponse(res, "Gagal memuat daftar folder output.");
+}
+
+export async function saveOutputToFolder(payload: {
+  id?: string;
+  title: string;
+  category: string;
+  imageBase64: string;
+  characterName?: string;
+  scriptSnippet?: string;
+  promptUsed?: string;
+  cameraAngle?: string;
+  artStyle?: string;
+  aspectRatio?: string;
+  tags?: string[];
+}): Promise<{ success: boolean; item: OutputItem }> {
+  const res = await fetch("/api/outputs/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  return await handleApiResponse(res, "Gagal menyimpan file ke folder output.");
+}
+
+export async function deleteOutputFromFolder(id: string): Promise<{ success: boolean; deletedId: string }> {
+  const res = await fetch(`/api/outputs/${id}`, {
+    method: "DELETE",
+  });
+
+  return await handleApiResponse(res, "Gagal menghapus file dari folder output.");
+}
+
+export async function batchDeleteOutputsFromFolder(ids: string[]): Promise<{ success: boolean; deletedCount: number }> {
+  const res = await fetch("/api/outputs/batch-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  });
+
+  return await handleApiResponse(res, "Gagal menghapus beberapa file output.");
+}
+
+export async function clearAllOutputsFromFolder(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch("/api/outputs/clear", {
+    method: "POST",
+  });
+
+  return await handleApiResponse(res, "Gagal mengosongkan folder output.");
+}
+

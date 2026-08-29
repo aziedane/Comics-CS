@@ -9,16 +9,19 @@ import {
   FileText,
   CheckCircle2,
   AlertCircle,
+  Folder,
 } from "lucide-react";
 
-export type ActiveTab = "generator" | "script" | "characters" | "gallery";
+export type ActiveTab = "generator" | "backgrounds" | "script" | "characters" | "gallery" | "outputs";
 
 interface NavbarProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   onOpenAnatomyGuide: () => void;
   savedPosesCount: number;
+  savedBackgroundsCount?: number;
   charactersCount: number;
+  outputsCount?: number;
   hasApiKey: boolean;
 }
 
@@ -27,7 +30,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectTab,
   onOpenAnatomyGuide,
   savedPosesCount,
+  savedBackgroundsCount = 0,
   charactersCount,
+  outputsCount = 0,
   hasApiKey,
 }) => {
   return (
@@ -70,6 +75,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
 
             <button
+              id="tab-backgrounds-btn"
+              onClick={() => onSelectTab("backgrounds")}
+              className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                activeTab === "backgrounds"
+                  ? "bg-rose-600 text-white shadow-md shadow-rose-950/40"
+                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+              }`}
+            >
+              <ImageIcon className="w-4 h-4 text-emerald-400" />
+              <span className="whitespace-nowrap">Studio Latar</span>
+            </button>
+
+            <button
               id="tab-script-btn"
               onClick={() => onSelectTab("script")}
               className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all ${
@@ -106,6 +124,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Layers className="w-4 h-4" />
               <span className="whitespace-nowrap">Database Pose ({savedPosesCount})</span>
+            </button>
+
+            <button
+              id="tab-outputs-btn"
+              onClick={() => onSelectTab("outputs")}
+              className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                activeTab === "outputs"
+                  ? "bg-rose-600 text-white shadow-md shadow-rose-950/40"
+                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+              }`}
+            >
+              <Folder className="w-4 h-4 text-amber-400" />
+              <span className="whitespace-nowrap">Folder Output {outputsCount > 0 ? `(${outputsCount})` : ""}</span>
             </button>
           </nav>
 

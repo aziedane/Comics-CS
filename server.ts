@@ -1,10 +1,162 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+// Ensure output folder exists on persistent server storage
+const OUTPUTS_DIR = path.join(process.cwd(), "outputs");
+const MANIFEST_PATH = path.join(OUTPUTS_DIR, "manifest.json");
+
+if (!fs.existsSync(OUTPUTS_DIR)) {
+  try {
+    fs.mkdirSync(OUTPUTS_DIR, { recursive: true });
+  } catch (err) {
+    console.error("Failed to create outputs directory:", err);
+  }
+}
+
+if (!fs.existsSync(MANIFEST_PATH)) {
+  try {
+    fs.writeFileSync(MANIFEST_PATH, JSON.stringify({ items: [] }, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to create initial manifest.json:", err);
+  }
+}
+
+interface OutputItemRecord {
+  id: string;
+  title: string;
+  category: string;
+  filename: string;
+  url: string;
+  thumbnailUrl?: string;
+  characterName?: string;
+  scriptSnippet?: string;
+  promptUsed?: string;
+  cameraAngle?: string;
+  artStyle?: string;
+  aspectRatio?: string;
+  fileSizeBytes?: number;
+  formattedSize?: string;
+  mimeType: string;
+  createdAt: number;
+  tags?: string[];
+  isFavorite?: boolean;
+}
+
+function getOutputsManifest(): { items: OutputItemRecord[] } {
+  try {
+    if (fs.existsSync(MANIFEST_PATH)) {
+      const data = fs.readFileSync(MANIFEST_PATH, "utf-8");
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed?.items)) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to read outputs manifest, resetting:", e);
+  }
+  return { items: [] };
+}
+
+function saveOutputsManifest(manifest: { items: OutputItemRecord[] }) {
+  try {
+    fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2), "utf-8");
+  } catch (e) {
+    console.error("Failed to write outputs manifest:", e);
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+function saveImageToDiskOutput(
+  imageDataUriOrBase64: string,
+  meta: {
+    id?: string;
+    title: string;
+    category: string;
+    characterName?: string;
+    scriptSnippet?: string;
+    promptUsed?: string;
+    cameraAngle?: string;
+    artStyle?: string;
+    aspectRatio?: string;
+    tags?: string[];
+  }
+): OutputItemRecord | null {
+  if (!imageDataUriOrBase64 || typeof imageDataUriOrBase64 !== "string") {
+    return null;
+  }
+
+  const id = meta.id || `out-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  let mime = "image/png";
+  let ext = "png";
+  let base64Data = imageDataUriOrBase64;
+
+  const match = imageDataUriOrBase64.match(/^data:(image\/[a-zA-Z0-9-+.]+);base64,/);
+  if (match) {
+    mime = match[1];
+    ext =
+      mime.includes("jpeg") || mime.includes("jpg")
+        ? "jpg"
+        : mime.includes("webp")
+        ? "webp"
+        : "png";
+    base64Data = imageDataUriOrBase64.replace(/^data:image\/[a-zA-Z0-9-+.]+;base64,/, "");
+  }
+
+  const safeTitle = (meta.title || "comic_output")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "_")
+    .substring(0, 30);
+  const filename = `${safeTitle}_${id}.${ext}`;
+  const filePath = path.join(OUTPUTS_DIR, filename);
+
+  try {
+    const buffer = Buffer.from(base64Data, "base64");
+    fs.writeFileSync(filePath, buffer);
+    const stats = fs.statSync(filePath);
+
+    const item: OutputItemRecord = {
+      id,
+      title: meta.title || "Hasil Komik",
+      category: meta.category || "pose",
+      filename,
+      url: `/outputs/${filename}`,
+      characterName: meta.characterName || "Character",
+      scriptSnippet: meta.scriptSnippet || "",
+      promptUsed: meta.promptUsed || "",
+      cameraAngle: meta.cameraAngle || "",
+      artStyle: meta.artStyle || "",
+      aspectRatio: meta.aspectRatio || "1:1",
+      fileSizeBytes: stats.size,
+      formattedSize: formatBytes(stats.size),
+      mimeType: mime,
+      createdAt: Date.now(),
+      tags: meta.tags || [],
+    };
+
+    const manifest = getOutputsManifest();
+    manifest.items = [item, ...manifest.items.filter((i) => i.id !== id)];
+    saveOutputsManifest(manifest);
+
+    return item;
+  } catch (err) {
+    console.error("Failed to write output image to disk:", err);
+    return null;
+  }
+}
+
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -183,7 +335,10 @@ async function startServer() {
         artStyle = "manga-screentone",
         cameraAngle = "eye-level",
         actionType = "dynamic-combat",
+        customActionType = "",
         expression = "determined",
+        customExpression = "",
+        customFeatures = "",
         aspectRatio = "1:1",
         anatomyGuideOverlay = false,
         lightingMood = "dramatic-contrast",
@@ -192,6 +347,9 @@ async function startServer() {
       if (!actionPrompt && !script) {
         return res.status(400).json({ error: "Mohon sediakan naskah atau deskripsi pose." });
       }
+
+      const effectiveAction = (actionType === "custom" && customActionType) ? customActionType : (customActionType || actionType);
+      const effectiveExpression = (expression === "custom" && customExpression) ? customExpression : (customExpression || expression);
 
       const ai = getGeminiClient();
 
@@ -252,9 +410,15 @@ async function startServer() {
       }
 
       const comicDirectorPrompt = `
-[TASK: COMIC CHARACTER POSE & ANATOMY GENERATION]
-You are a master comic book artist and mangaka.
-Generate a new illustration of the character in the reference image performing the EXACT pose and action described in the comic script.
+[TASK: ISOLATED SOLID CHARACTER POSE GENERATION - NO BACKGROUND SCENERY]
+You are a master character artist, mangaka, and digital illustrator.
+Generate a high-definition illustration of ONLY the character performing the EXACT pose and action described, completely isolated on a clean white blank studio canvas.
+
+CRITICAL CHARACTER OPACITY & RENDERING MANDATE:
+- 100% SOLID & OPAQUE CHARACTER: Render the character with full opacity, dense solid colors, crisp ink linework, opaque skin tones, detailed clothing textures, and rich shading. The character MUST NOT be transparent, ghostly, or see-through in any way.
+- SUBJECT ONLY: Draw ONLY the solid character figure in the requested action and pose.
+- PURE SOLID WHITE BLANK BACKGROUND (#FFFFFF): Absolutely ZERO background scenery. NO background buildings, NO landscapes, NO ground textures, NO room furniture, NO trees, NO background silhouettes.
+- Clean, sharp outer silhouette contour separating the solid character from the blank white space.
 
 CHARACTER CONSISTENCY MANDATE:
 - Retain the exact same character identity from the reference image: same face structure, hairstyle, hair color, facial features, distinctive costume/clothing elements, and body proportions.
@@ -262,20 +426,19 @@ CHARACTER CONSISTENCY MANDATE:
 - Key Character Visual Traits: ${characterTraits || "Match reference image exactly"}
 
 NEW POSE & SCRIPT ACTION:
-- Comic Script/Scene: "${script}"
-- Requested Action & Pose: "${actionPrompt}"
-- Character Emotion/Expression: ${expression}
-- Action Category: ${actionType}
+- Action & Gesture: "${actionPrompt || script}"
+- Character Emotion/Expression: ${effectiveExpression}
+- Action Category / Movement: ${effectiveAction}
 - Camera Perspective & Framing: ${cameraInstruction}
 - Art Style: ${styleInstruction}
-- Lighting & Atmosphere: ${lightingMood}
+- Character Lighting: ${lightingMood}
+${customFeatures ? `- Additional Character Features & Effects: ${customFeatures}` : ""}
 ${anatomyGuideText ? `- Anatomy Guide: ${anatomyGuideText}` : ""}
 
 ANATOMY & ARTISTIC QUALITY REQUIREMENTS:
 - Precise anatomical accuracy (correct joints, believable muscle flexion, natural hand gestures with proper finger articulation).
 - Exaggerated comic dynamic line of action and kinetic energy.
-- Composition suitable as a master comic panel / character pose reference sheet.
-- Pure subject rendering, no distracting background clutter unless relevant to the script.
+- Crisp clean solid character illustration on pure white blank studio background.
       `.trim();
 
       const parts: any[] = [];
@@ -335,31 +498,51 @@ ANATOMY & ARTISTIC QUALITY REQUIREMENTS:
         });
       }
 
-      // Check if separateLayers was requested
-      const { separateLayers = true } = req.body;
+      // Check if separateLayers was requested (default to false for fast, dedicated character pose generation)
+      const { separateLayers = false } = req.body;
       let generatedBgUrl: string | null = null;
 
       if (separateLayers && (script || actionPrompt)) {
         try {
           const bgDirectorPrompt = `
-[TASK: HIGH DEFINITION COMIC BACKGROUND SCENERY GENERATION]
+[TASK: HIGH DEFINITION COMIC BACKGROUND SCENERY GENERATION - MATCHING COMPOSITE SCENE PLATE]
 You are a master comic book background artist and environment concept designer.
-Generate a high-definition, highly detailed comic book background scene plate matching this comic panel:
-- Scene/Setting Description: "${script || actionPrompt}"
-- Camera Perspective & Angle: ${cameraInstruction}
-- Art Style: ${styleInstruction}
-- Lighting & Atmosphere: ${lightingMood}
+Look at the attached character image (this is the character figure that will be placed directly onto this background).
+Generate ONLY the matching clean background scenery plate (NO human figures, NO foreground characters) that perfectly fits behind this character:
 
-CRITICAL RULES:
-1. CLEAN BACKGROUND PLATE ONLY: Absolutely NO human characters, NO figures, NO faces, NO silhouettes of people.
-2. High-definition environmental texture, architectural depth, perspective lines, dramatic lighting, and comic screentones / shading.
-3. Perfect backdrop ready to place a character overlay on top in Photoshop, Procreate, or Clip Studio Paint.
+SCENE & ENVIRONMENTAL CONTEXT:
+- Scene/Setting Description: "${script || actionPrompt}"
+- Character Action & Pose in this scene: "${actionPrompt || script}"
+- Camera Perspective, Angle & Framing: ${cameraInstruction}
+- Comic Art Style: ${styleInstruction}
+- Environmental Lighting & Atmospheric Mood: ${lightingMood}
+${customFeatures ? `- Environmental & Atmospheric Effects: ${customFeatures}` : ""}
+
+CRITICAL INTEGRATION & PERSPECTIVE ALIGNMENT MANDATES:
+1. CLEAN BACKGROUND PLATE ONLY: Absolutely NO characters, NO human faces, NO hero silhouettes in the foreground.
+2. GROUND PLANE & PERSPECTIVE HARMONY: Align the ground/floor perspective, vanishing lines, horizon height, and architectural scale to match the character's contact point and body posture in the reference image (whether standing, sitting, crouching, or leaping).
+3. LIGHTING & ART STYLE SEAMLESSNESS: The environmental lighting direction, ink stroke weight, screentone shading, and color palette must naturally integrate with the character so when composited, the character and background form a unified, cohesive comic panel.
+4. Production-ready background plate ready to place the isolated transparent character overlay on top without perspective or lighting mismatch.
           `.trim();
+
+          const bgParts: any[] = [];
+          if (generatedImageUrl) {
+            const charImgRaster = extractValidBase64(generatedImageUrl, "image/png");
+            if (charImgRaster.valid) {
+              bgParts.push({
+                inlineData: {
+                  mimeType: charImgRaster.mimeType,
+                  data: charImgRaster.base64Data,
+                },
+              });
+            }
+          }
+          bgParts.push({ text: bgDirectorPrompt });
 
           const bgResponse = await executeWithRetry(async () => {
             return await ai.models.generateContent({
               model: "gemini-3.1-flash-lite-image",
-              contents: { parts: [{ text: bgDirectorPrompt }] },
+              contents: { parts: bgParts },
               config: {
                 imageConfig: {
                   aspectRatio: selectedAspectRatio,
@@ -383,12 +566,48 @@ CRITICAL RULES:
         }
       }
 
+      // Auto-save generated pose to persistent output folder on disk
+      let savedOutputRecord: OutputItemRecord | null = null;
+      try {
+        if (generatedImageUrl) {
+          savedOutputRecord = saveImageToDiskOutput(generatedImageUrl, {
+            title: `Pose ${characterName || "Karakter"}`,
+            category: "pose",
+            characterName: characterName || "Character",
+            scriptSnippet: script,
+            promptUsed: comicDirectorPrompt,
+            cameraAngle,
+            artStyle,
+            aspectRatio: selectedAspectRatio,
+            tags: [artStyle, cameraAngle, actionType, expression],
+          });
+        }
+
+        // Also save background if generated separately
+        if (generatedBgUrl) {
+          saveImageToDiskOutput(generatedBgUrl, {
+            title: `Latar Belakang - ${characterName || "Scene"}`,
+            category: "hd-background",
+            characterName: characterName || "Character",
+            scriptSnippet: script,
+            promptUsed: comicDirectorPrompt,
+            cameraAngle,
+            artStyle,
+            aspectRatio: selectedAspectRatio,
+            tags: ["background", artStyle, cameraAngle],
+          });
+        }
+      } catch (saveErr) {
+        console.warn("Auto-save to output folder skipped:", saveErr);
+      }
+
       res.json({
         success: true,
         imageUrl: generatedImageUrl,
         characterPngUrl: generatedImageUrl,
         backgroundJpegUrl: generatedBgUrl,
         hasSeparatedLayers: Boolean(generatedBgUrl),
+        outputUrl: savedOutputRecord?.url,
         promptUsed: comicDirectorPrompt,
         script: script,
         actionPrompt: actionPrompt,
@@ -415,14 +634,18 @@ CRITICAL RULES:
     try {
       const {
         script = "",
+        actionPrompt = "",
         environmentPrompt = "",
+        characterImageBase64 = "",
+        mimeType = "image/png",
         artStyle = "manga-screentone",
         cameraAngle = "eye-level",
         aspectRatio = "1:1",
         lightingMood = "dramatic-contrast",
+        customFeatures = "",
       } = req.body;
 
-      if (!script && !environmentPrompt) {
+      if (!script && !environmentPrompt && !actionPrompt) {
         return res.status(400).json({ error: "Deskripsi lokasi atau naskah latar belakang diperlukan." });
       }
 
@@ -450,27 +673,46 @@ CRITICAL RULES:
       }
 
       const bgDirectorPrompt = `
-[TASK: HIGH DEFINITION COMIC BACKGROUND SCENERY GENERATION]
+[TASK: HIGH DEFINITION COMIC BACKGROUND SCENERY GENERATION - MATCHING COMPOSITE SCENE PLATE]
 You are a master comic book background artist and environment concept designer.
-Generate a high-definition, highly detailed comic book background scene plate matching this comic panel:
-- Scene/Setting Description: "${script || environmentPrompt}"
-- Camera Perspective & Angle: ${cameraAngle}
-- Art Style: ${styleInstruction}
-- Lighting & Atmosphere: ${lightingMood}
+${characterImageBase64 ? "Look at the attached character image (this is the character that will be placed onto this background). Generate ONLY the matching clean background scenery plate (NO human figures, NO foreground characters) that perfectly fits behind this character." : "Generate a high-definition clean comic book background plate matching this scene."}
 
-CRITICAL RULES:
-1. CLEAN BACKGROUND PLATE ONLY: Absolutely NO human characters, NO figures, NO faces, NO silhouettes of people.
-2. High-definition environmental texture, architectural depth, perspective lines, dramatic lighting, and comic screentones / shading.
-3. Output format: High Definition JPEG, clear without blur.
+SCENE & ENVIRONMENTAL CONTEXT:
+- Scene/Setting Description: "${script || environmentPrompt || actionPrompt}"
+- Character Action & Pose: "${actionPrompt || script || "In scene"}"
+- Camera Perspective & Perspective Angle: ${cameraAngle}
+- Comic Art Style: ${styleInstruction}
+- Environmental Lighting & Atmosphere: ${lightingMood}
+${customFeatures ? `- Environmental & Atmospheric Effects: ${customFeatures}` : ""}
+
+CRITICAL INTEGRATION & SEAMLESS PERSPECTIVE MANDATES:
+1. CLEAN BACKGROUND PLATE ONLY: Absolutely NO human characters, NO figures, NO faces, NO foreground silhouettes of people.
+2. GROUND CONTACT & HORIZON HARMONY: Align the ground/floor plane, horizon line, and room architecture to match the character's contact point and posture in the reference image (so the character stands, sits, or moves naturally in this space without floating).
+3. ART STYLE & LIGHTING UNITY: High-definition environmental texture, architectural depth, perspective vanishing points, matching shadow angle, and comic screentones / shading.
+4. Output format: High Definition JPEG, clear without blur, ready to overlay character layers.
       `.trim();
 
       const validAspectRatios = ["1:1", "3:4", "4:3", "9:16", "16:9"];
       const selectedAspectRatio = validAspectRatios.includes(aspectRatio) ? aspectRatio : "1:1";
 
+      const bgParts: any[] = [];
+      if (characterImageBase64) {
+        const charImgRaster = extractValidBase64(characterImageBase64, mimeType || "image/png");
+        if (charImgRaster.valid) {
+          bgParts.push({
+            inlineData: {
+              mimeType: charImgRaster.mimeType,
+              data: charImgRaster.base64Data,
+            },
+          });
+        }
+      }
+      bgParts.push({ text: bgDirectorPrompt });
+
       const bgResponse = await executeWithRetry(async () => {
         return await ai.models.generateContent({
           model: "gemini-3.1-flash-lite-image",
-          contents: { parts: [{ text: bgDirectorPrompt }] },
+          contents: { parts: bgParts },
           config: {
             imageConfig: {
               aspectRatio: selectedAspectRatio,
@@ -494,9 +736,28 @@ CRITICAL RULES:
         return res.status(500).json({ error: "Gagal menghasilkan latar belakang HD." });
       }
 
+      // Auto-save generated background to output folder
+      let savedBgRecord: OutputItemRecord | null = null;
+      try {
+        savedBgRecord = saveImageToDiskOutput(backgroundJpegUrl, {
+          title: `Latar Belakang - ${script?.substring(0, 20) || "Scenery"}`,
+          category: "hd-background",
+          characterName: "Scenery",
+          scriptSnippet: script || environmentPrompt,
+          promptUsed: bgDirectorPrompt,
+          cameraAngle,
+          artStyle,
+          aspectRatio: selectedAspectRatio,
+          tags: ["background", artStyle, cameraAngle],
+        });
+      } catch (err) {
+        console.warn("Auto-save background skipped:", err);
+      }
+
       res.json({
         success: true,
         backgroundJpegUrl: backgroundJpegUrl,
+        outputUrl: savedBgRecord?.url,
         promptUsed: bgDirectorPrompt,
       });
     } catch (error: any) {
@@ -605,9 +866,27 @@ STRICT VISUAL REQUIREMENTS & CULTURAL ADHERENCE:
         return res.status(500).json({ error: "Model tidak menghasilkan gambar karakter." });
       }
 
+      // Auto-save generated character model sheet to output folder
+      let savedCharRecord: OutputItemRecord | null = null;
+      try {
+        savedCharRecord = saveImageToDiskOutput(generatedImageUrl, {
+          title: `Model Sheet - ${characterName}`,
+          category: "character-sheet",
+          characterName,
+          scriptSnippet: characterDescription || visualPrompt,
+          promptUsed: charDirectorPrompt,
+          artStyle,
+          aspectRatio: selectedAspectRatio,
+          tags: ["character-sheet", characterName, artStyle],
+        });
+      } catch (err) {
+        console.warn("Auto-save character art skipped:", err);
+      }
+
       res.json({
         success: true,
         imageUrl: generatedImageUrl,
+        outputUrl: savedCharRecord?.url,
         promptUsed: charDirectorPrompt,
         characterName,
       });
@@ -831,6 +1110,190 @@ Berikan output JSON dengan:
         isQuotaError: parsed.isQuotaError,
         retryAfterSeconds: parsed.retryAfterSeconds,
       });
+    }
+  });
+
+  // --- OUTPUT FOLDER & PERSISTENCE MANAGEMENT ENDPOINTS ---
+  // Serve static files directly from outputs directory
+  app.use("/outputs", express.static(OUTPUTS_DIR));
+
+  // 5. Get all outputs and disk statistics
+  app.get("/api/outputs", (_req, res) => {
+    try {
+      const manifest = getOutputsManifest();
+      let totalBytes = 0;
+      const categoryCounts: Record<string, number> = {
+        pose: 0,
+        "storyboard-panel": 0,
+        "character-cutout": 0,
+        "hd-background": 0,
+        "character-sheet": 0,
+        custom: 0,
+      };
+
+      const validItems = manifest.items.filter((item) => {
+        const filePath = path.join(OUTPUTS_DIR, item.filename);
+        const exists = fs.existsSync(filePath);
+        if (exists) {
+          totalBytes += item.fileSizeBytes || 0;
+          if (categoryCounts[item.category] !== undefined) {
+            categoryCounts[item.category]++;
+          } else {
+            categoryCounts[item.category] = 1;
+          }
+        }
+        return exists;
+      });
+
+      if (validItems.length !== manifest.items.length) {
+        manifest.items = validItems;
+        saveOutputsManifest(manifest);
+      }
+
+      res.json({
+        success: true,
+        items: validItems,
+        stats: {
+          totalFiles: validItems.length,
+          totalSizeBytes: totalBytes,
+          formattedTotalSize: formatBytes(totalBytes),
+          categoryCounts,
+          latestUpdated: validItems[0]?.createdAt || Date.now(),
+        },
+      });
+    } catch (err: any) {
+      console.error("Error retrieving outputs:", err);
+      res.status(500).json({ error: "Gagal memuat daftar folder output." });
+    }
+  });
+
+  // 6. Explicit Save to Output Folder
+  app.post("/api/outputs/save", (req, res) => {
+    try {
+      const {
+        id,
+        title,
+        category = "pose",
+        imageBase64,
+        characterName,
+        scriptSnippet,
+        promptUsed,
+        cameraAngle,
+        artStyle,
+        aspectRatio,
+        tags,
+      } = req.body;
+
+      if (!imageBase64) {
+        return res.status(400).json({ error: "Data gambar diperlukan untuk disimpan ke folder output." });
+      }
+
+      const savedItem = saveImageToDiskOutput(imageBase64, {
+        id,
+        title: title || "Hasil Komik",
+        category,
+        characterName,
+        scriptSnippet,
+        promptUsed,
+        cameraAngle,
+        artStyle,
+        aspectRatio,
+        tags,
+      });
+
+      if (!savedItem) {
+        return res.status(500).json({ error: "Gagal menulis file ke folder output server." });
+      }
+
+      res.json({ success: true, item: savedItem });
+    } catch (err: any) {
+      console.error("Error saving output:", err);
+      res.status(500).json({ error: "Gagal menyimpan hasil ke folder output." });
+    }
+  });
+
+  // 7. Delete Single Output
+  app.delete("/api/outputs/:id", (req, res) => {
+    try {
+      const { id } = req.params;
+      const manifest = getOutputsManifest();
+      const itemToDelete = manifest.items.find((i) => i.id === id);
+
+      if (itemToDelete) {
+        const filePath = path.join(OUTPUTS_DIR, itemToDelete.filename);
+        if (fs.existsSync(filePath)) {
+          try {
+            fs.unlinkSync(filePath);
+          } catch (e) {
+            console.warn("Failed to delete file from disk:", e);
+          }
+        }
+      }
+
+      manifest.items = manifest.items.filter((i) => i.id !== id);
+      saveOutputsManifest(manifest);
+
+      res.json({ success: true, deletedId: id });
+    } catch (err: any) {
+      console.error("Error deleting output item:", err);
+      res.status(500).json({ error: "Gagal menghapus file dari folder output." });
+    }
+  });
+
+  // 8. Batch Delete Outputs
+  app.post("/api/outputs/batch-delete", (req, res) => {
+    try {
+      const { ids = [] } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "Daftar ID diperlukan." });
+      }
+
+      const idSet = new Set(ids);
+      const manifest = getOutputsManifest();
+
+      for (const item of manifest.items) {
+        if (idSet.has(item.id)) {
+          const filePath = path.join(OUTPUTS_DIR, item.filename);
+          if (fs.existsSync(filePath)) {
+            try {
+              fs.unlinkSync(filePath);
+            } catch (e) {
+              // ignore
+            }
+          }
+        }
+      }
+
+      manifest.items = manifest.items.filter((i) => !idSet.has(i.id));
+      saveOutputsManifest(manifest);
+
+      res.json({ success: true, deletedCount: ids.length });
+    } catch (err: any) {
+      console.error("Error batch deleting outputs:", err);
+      res.status(500).json({ error: "Gagal menghapus beberapa file output." });
+    }
+  });
+
+  // 9. Clear All Outputs
+  app.post("/api/outputs/clear", (_req, res) => {
+    try {
+      const manifest = getOutputsManifest();
+      for (const item of manifest.items) {
+        const filePath = path.join(OUTPUTS_DIR, item.filename);
+        if (fs.existsSync(filePath)) {
+          try {
+            fs.unlinkSync(filePath);
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+
+      saveOutputsManifest({ items: [] });
+      res.json({ success: true, message: "Folder output berhasil dikosongkan." });
+    } catch (err: any) {
+      console.error("Error clearing outputs:", err);
+      res.status(500).json({ error: "Gagal mengosongkan folder output." });
     }
   });
 
